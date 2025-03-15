@@ -54,12 +54,13 @@ def generate_sql_query(user_query, schema_info):
     
     Genera una consulta SQL que extraiga la información relevante considerando las relaciones entre tablas.
     Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
+    Si el usuario pregunta por algún atributo que no existe en la base de datos, cámbialo por el más parecido en nombre o lógica.
     """
     
     response = client.chat.completions.create(
         model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
         messages=[{"role": "user", "content":prompt}],
-        temperature=0.7
+        temperature=0.3
     )
     
     return response.choices[0].message.content.strip()
@@ -107,6 +108,28 @@ client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
 app = Flask(__name__)
 CORS(app)  # Permite peticiones desde el frontend
 
+@app.route('/get_patients', methods=['GET'])
+def get_pacientes():
+    """
+    Devuelve los pacientes (nombre, apellidos, id) desde la base de datos.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Consulta SQL para obtener los pacientes
+        cur.execute("SELECT PacienteID, Nombre, Apellido FROM pacientes")
+        pacientes = cur.fetchall()
+        conn.close()
+        
+        # Convertir los resultados a una lista de diccionarios
+        pacientes_data = [{"id": paciente["PacienteID"], "nombre": paciente["Nombre"], "apellidos": paciente["Apellido"]} for paciente in pacientes]
+        
+        return jsonify(pacientes_data)
+    except Exception as e:
+        conn.close()
+        return jsonify({"error": f"Error al obtener los pacientes: {str(e)}"}), 500
+
 @app.route("/send_message", methods=["POST"])
 def send_message():
     data = request.json
@@ -119,7 +142,7 @@ def send_message():
         classification_response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             messages=[{"role": "user", "content": f"Determina si el siguiente mensaje es una pregunta médica o una conversación general. Responde solo con 'médica' o 'general'. Si te pregunta algo sobre algún paciente, seguro que es médica\n\nMensaje: {message}"}],
-            temperature=0.7
+            temperature=0.3
         )
         classification = classification_response.choices[0].message.content.strip().lower()
         
@@ -130,7 +153,7 @@ def send_message():
                     {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Te van a pedir información sobre algún paciente y tendrás que responder utilizando la información que se te proporcione, de la mejor manera posible"},
                     {"role": "user", "content": message}
                 ],
-                temperature=0.7
+                temperature=0.3
             )
             return jsonify({"response": response_general.choices[0].message.content})
         
@@ -141,9 +164,9 @@ def send_message():
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             messages=[
                 {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Te van a pedir información sobre algún paciente y tendrás que responder utilizando la información que se te proporcione, de la mejor manera posible."},
-                {"role": "user", "content": enhanced_prompt}
+                {"role": "user", "content":f"Aquí tienes la pregunta del usuario y la respuesta: {enhanced_prompt}. Con esos datos, da una respuesta lógica, buena, breve y convincente al médico que te pregunta. Si solo recibes los datos de un paciente, no menciones que solo tienes datos de uno; esa es la respuesta, ya filtrada de una gran base de datos, con lo que te tienes que mostar seguro y responder con determinación, y no olvides justificar por qué has elegido esa respuesta en caso de pregunta más bien abierta. Si no estás seguro de la respuesta, déjalo claro, pero sin pasarte."}
             ],
-            temperature=0.7
+            temperature=0.3
         )
         return jsonify({"response": response.choices[0].message.content})
     
