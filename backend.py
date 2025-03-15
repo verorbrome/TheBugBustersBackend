@@ -58,7 +58,7 @@ def generate_sql_query(user_query, schema_info):
     
     response = client.chat.completions.create(
         model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content":prompt}],
         temperature=0.7
     )
     
@@ -78,6 +78,9 @@ def retrieve_relevant_data(user_query):
     cur = conn.cursor()
     
     try:
+        # Imprimir la consulta SQL antes de ejecutarla
+        print(f"Ejecutando consulta SQL: {sql_query}")
+
         cur.execute(sql_query)
         results = cur.fetchall()
         conn.close()
@@ -115,7 +118,7 @@ def send_message():
     try:
         classification_response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-            messages=[{"role": "user", "content": f"Determina si el siguiente mensaje es una pregunta médica o una conversación general. Responde solo con 'médica' o 'general'.\n\nMensaje: {message}"}],
+            messages=[{"role": "user", "content": f"Determina si el siguiente mensaje es una pregunta médica o una conversación general. Responde solo con 'médica' o 'general'. Si te pregunta algo sobre algún paciente, seguro que es médica\n\nMensaje: {message}"}],
             temperature=0.7
         )
         classification = classification_response.choices[0].message.content.strip().lower()
@@ -124,7 +127,7 @@ def send_message():
             response_general = client.chat.completions.create(
                 model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
                 messages=[
-                    {"role": "system", "content": "Eres un asistente virtual dirigido a médicos."},
+                    {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Te van a pedir información sobre algún paciente y tendrás que responder utilizando la información que se te proporcione, de la mejor manera posible"},
                     {"role": "user", "content": message}
                 ],
                 temperature=0.7
@@ -137,7 +140,7 @@ def send_message():
         response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             messages=[
-                {"role": "system", "content": "Eres un asistente virtual para médicos."},
+                {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Te van a pedir información sobre algún paciente y tendrás que responder utilizando la información que se te proporcione, de la mejor manera posible."},
                 {"role": "user", "content": enhanced_prompt}
             ],
             temperature=0.7
@@ -154,6 +157,7 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
     print("Directorio de trabajo cambiado a:", os.getcwd())  # 🔍 Para depuración
-    
+
     print("🔥 Servidor corriendo en http://127.0.0.1:5000/")
     app.run(debug=True, port=5000)
+
