@@ -13,33 +13,48 @@ def get_db_connection():
 
 def get_database_schema():
     """
-    Obtiene la estructura de la base de datos: nombres de tablas y columnas.
+    Obtiene la estructura completa de la base de datos: nombres de tablas, columnas y relaciones.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    tables = cur.fetchall()
-
+    tables = [row[0] for row in cur.fetchall()]
+    
     schema_info = {}
     for table in tables:
-        table_name = table[0]  # Asegurar que accedemos correctamente al nombre de la tabla
-        cur.execute(f"PRAGMA table_info({table_name})")
-        columns = [row[1] for row in cur.fetchall()]  # row[1] es el nombre de la columna
-        schema_info[table_name] = columns
+        cur.execute(f"PRAGMA table_info({table})")
+        columns = [row[1] for row in cur.fetchall()]
+        
+        cur.execute(f"PRAGMA foreign_key_list({table})")
+        foreign_keys = [{"from": row[3], "to": row[2], "table": row[2]} for row in cur.fetchall()]
+        
+        schema_info[table] = {"columns": columns, "foreign_keys": foreign_keys}
     
     conn.close()
     return schema_info if schema_info else {"error": "No hay tablas en la base de datos."}
 
 def generate_sql_query(user_query, schema_info):
     """
-    Usa el modelo para generar una consulta SQL basada en la estructura de la base de datos y la pregunta del usuario.
+    Usa el modelo para generar una consulta SQL considerando todas las tablas relacionadas.
     """
     if "error" in schema_info:
         return "No hay tablas disponibles para realizar la consulta."
     
-    schema_text = "\n".join([f"Tabla: {table}, Columnas: {', '.join(columns)}" for table, columns in schema_info.items()])
-    prompt = f"Estructura de la base de datos:\n{schema_text}\n\nPregunta del usuario: {user_query}\n\nGenera una consulta SQL que pueda recuperar información relevante sobre un paciente si se menciona su nombre. Solo devuelve la consulta sin explicaciones."
+    schema_text = "\n".join(
+        [f"Tabla: {table}, Columnas: {', '.join(info['columns'])}, Relaciones: {info['foreign_keys']}" 
+         for table, info in schema_info.items()]
+    )
+    
+    prompt = f"""
+    Estructura de la base de datos:
+    {schema_text}
+    
+    Pregunta del usuario: {user_query}
+    
+    Genera una consulta SQL que extraiga la información relevante considerando las relaciones entre tablas.
+    Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
+    """
     
     response = client.chat.completions.create(
         model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
@@ -51,7 +66,7 @@ def generate_sql_query(user_query, schema_info):
 
 def retrieve_relevant_data(user_query):
     """
-    Recupera información relevante generando y ejecutando una consulta SQL adecuada.
+    Recupera información relevante ejecutando una consulta SQL adecuada sobre varias tablas si es necesario.
     """
     schema_info = get_database_schema()
     sql_query = generate_sql_query(user_query, schema_info)
@@ -67,7 +82,7 @@ def retrieve_relevant_data(user_query):
         results = cur.fetchall()
         conn.close()
         
-        retrieved_texts = "\n".join(str(dict(row)) for row in results)
+        retrieved_texts = [dict(row) for row in results]
         return retrieved_texts if retrieved_texts else "No se encontró información relevante."
     except Exception as e:
         conn.close()
@@ -98,7 +113,6 @@ def send_message():
         return jsonify({"error": "Mensaje vacío"}), 400
 
     try:
-        # Determinar si la consulta es médica o general usando el modelo
         classification_response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             messages=[{"role": "user", "content": f"Determina si el siguiente mensaje es una pregunta médica o una conversación general. Responde solo con 'médica' o 'general'.\n\nMensaje: {message}"}],
@@ -110,27 +124,25 @@ def send_message():
             response_general = client.chat.completions.create(
                 model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
                 messages=[
-                    {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Debes responder con respeto y profesionalismo, ajustando la longitud de tu respuesta a la complejidad del mensaje."},
-                    {"role": "user", "content": f"Responde al siguiente mensaje de manera concisa si es breve y de manera más detallada si es complejo. Además, menciona que el usuario puede hacer preguntas médicas si lo desea.\n\nMensaje: {message}"}
+                    {"role": "system", "content": "Eres un asistente virtual dirigido a médicos."},
+                    {"role": "user", "content": message}
                 ],
                 temperature=0.7
             )
             return jsonify({"response": response_general.choices[0].message.content})
         
-        # Recuperar datos relevantes antes de generar respuesta
         retrieved_data = retrieve_relevant_data(message)
-        enhanced_prompt = f"Datos recuperados de la base de datos:\n{retrieved_data}\n\nPregunta del usuario: {message}\n\nResponde basándote en los datos proporcionados o indica si no hay suficiente información."
+        enhanced_prompt = f"Datos recuperados:\n{retrieved_data}\n\nPregunta del usuario: {message}"
 
         response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             messages=[
-                {"role": "system", "content": "Eres un asistente virtual para médicos. Responde de manera profesional y respetuosa, adaptando la longitud del mensaje a la pregunta realizada."},
+                {"role": "system", "content": "Eres un asistente virtual para médicos."},
                 {"role": "user", "content": enhanced_prompt}
             ],
             temperature=0.7
         )
-        message_response = response.choices[0].message.content
-        return jsonify({"response": message_response})
+        return jsonify({"response": response.choices[0].message.content})
     
     except Exception as e:
         print(f"Error: {str(e)}")
@@ -138,5 +150,10 @@ def send_message():
         return jsonify({"error": "Ocurrió un error en el servidor", "details": str(e)}), 500
 
 if __name__ == "__main__":
+    # 🔥 Cambia el directorio de trabajo al directorio donde está el script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)
+    print("Directorio de trabajo cambiado a:", os.getcwd())  # 🔍 Para depuración
+    
     print("🔥 Servidor corriendo en http://127.0.0.1:5000/")
     app.run(debug=True, port=5000)
