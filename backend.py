@@ -55,6 +55,7 @@ def generate_sql_query(user_query, schema_info):
     Genera una consulta SQL que extraiga la información relevante considerando las relaciones entre tablas.
     Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
     Si el usuario pregunta por algún atributo que no existe en la base de datos, cámbialo por el más parecido en nombre o lógica.
+    Si el usuario pregunta por un nombre, pasa siempre tanto el nombre como el apellido.
     """
     
     response = client.chat.completions.create(
@@ -118,12 +119,12 @@ def get_pacientes():
     
     try:
         # Consulta SQL para obtener los pacientes
-        cur.execute("SELECT PacienteID, Nombre, Apellido FROM pacientes")
+        cur.execute("SELECT PacienteID, Nombre, Apellido FROM resumen_pacientes")
         pacientes = cur.fetchall()
         conn.close()
         
         # Convertir los resultados a una lista de diccionarios
-        pacientes_data = [{"id": paciente["PacienteID"], "nombre": paciente["Nombre"], "apellidos": paciente["Apellido"]} for paciente in pacientes]
+        pacientes_data = [{"id": paciente["PacienteID"], "nombre": paciente["Nombre"], "apellido": paciente["Apellido"]} for paciente in pacientes]
         
         return jsonify(pacientes_data)
     except Exception as e:
@@ -164,7 +165,7 @@ def send_message():
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             messages=[
                 {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Te van a pedir información sobre algún paciente y tendrás que responder utilizando la información que se te proporcione, de la mejor manera posible."},
-                {"role": "user", "content":f"Aquí tienes la pregunta del usuario y la respuesta: {enhanced_prompt}. Con esos datos, da una respuesta lógica, buena, breve y convincente al médico que te pregunta. Si solo recibes los datos de un paciente, no menciones que solo tienes datos de uno; esa es la respuesta, ya filtrada de una gran base de datos, con lo que te tienes que mostar seguro y responder con determinación, y no olvides justificar por qué has elegido esa respuesta en caso de pregunta más bien abierta. Si no estás seguro de la respuesta, déjalo claro, pero sin pasarte."}
+                {"role": "user", "content":f"Aquí tienes la pregunta del usuario y la respuesta: {enhanced_prompt}. Con esos datos, da una respuesta lógica, buena, breve y convincente al médico que te pregunta. Si solo recibes los datos de un paciente, no menciones que solo tienes datos de uno; esa es la respuesta, ya filtrada de una gran base de datos, con lo que te tienes que mostar seguro y responder con determinación, y no olvides justificar por qué has elegido esa respuesta en caso de pregunta más bien abierta. Si no estás seguro de la respuesta, déjalo claro, pero sin pasarte. Si te piden un nombre y sabes el apellido, pasa tanto nombre como apellido directamente."}
             ],
             temperature=0.3
         )
@@ -183,4 +184,3 @@ if __name__ == "__main__":
 
     print("🔥 Servidor corriendo en http://127.0.0.1:5000/")
     app.run(debug=True, port=5000)
-
