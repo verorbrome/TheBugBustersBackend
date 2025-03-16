@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 import os
 import traceback
 import sqlite3
+from fpdf import FPDF
+import re
 
 def get_db_connection():
     conn = sqlite3.connect('database.db')
@@ -109,6 +111,49 @@ client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
 app = Flask(__name__)
 CORS(app)  # Permite peticiones desde el frontend
 
+common_questions = [
+    "¿Cuál es el tratamiento para la diabetes?",
+    "¿Qué es la hipertensión?",
+    "¿Cuáles son los síntomas del COVID-19?",
+    "¿Cómo se puede prevenir la obesidad?",
+    "¿Qué debo hacer si tengo fiebre?",
+]
+
+answers = [
+    "El tratamiento incluye cambios en la alimentación, ejercicio y, en algunos casos, insulina o medicamentos orales.",
+    "Es una condición en la que la presión arterial es demasiado alta, lo que puede aumentar el riesgo de enfermedades cardíacas.",
+    "Los síntomas incluyen fiebre, tos, dificultad para respirar, fatiga y pérdida del olfato o gusto.",
+    "Se recomienda una alimentación balanceada, actividad física regular y evitar el sedentarismo.",
+    "Se aconseja descansar, mantenerse hidratado y acudir al médico si la fiebre es alta o persistente.",
+]
+
+# Función para generar un informe en PDF con preguntas y respuestas
+def generate_pdf_report(questions, answers):
+    if len(questions) != len(answers):
+        raise ValueError("Las listas de preguntas y respuestas deben tener la misma longitud.")
+    
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    
+    # Configurar fuente y título
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Informe de Pacientes", ln=True, align="C")
+    pdf.ln(10)  # Espacio después del título
+
+    # Agregar preguntas y respuestas enumeradas
+    pdf.set_font("Arial", size=12)
+    for i, (question, answer) in enumerate(zip(questions, answers), start=1):
+        pdf.set_font("Arial", "B", 12)
+        pdf.multi_cell(0, 8, f"{i}. {question}")  # Pregunta enumerada
+        pdf.set_font("Arial", size=11)
+        pdf.multi_cell(0, 8, answer)  # Respuesta en texto normal
+        pdf.ln(5)  # Espacio entre cada bloque de pregunta-respuesta
+
+    # Guardar el informe en un archivo PDF
+    pdf.output("informe_pacientes.pdf", "F")
+    return "informe_pacientes.pdf"
+
 @app.route('/get_patients', methods=['GET'])
 def get_pacientes():
     """
@@ -181,6 +226,6 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
     print("Directorio de trabajo cambiado a:", os.getcwd())  # 🔍 Para depuración
-
+    generate_pdf_report(common_questions, answers)
     print("🔥 Servidor corriendo en http://127.0.0.1:5000/")
     app.run(debug=True, port=5000)
