@@ -58,8 +58,9 @@ def generate_sql_query(user_query, schema_info):
     Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
     Si el usuario pregunta por algún atributo que no existe en la base de datos, cámbialo por el más parecido en nombre o lógica.
     Si el usuario pregunta por un nombre, pasa siempre tanto el nombre como el apellido.
+    Intenta evitar usar la tabla resumen_evolucion, y recurre a ella solo si en el resto de tablas no hay nada parecido a lo que se pregunta.
+    Si te preguntan por algún nombre propio en la pregunta, búscalo porque es muy probable que aparezca en la base de datos.
     """
-    
     response = client.chat.completions.create(
         model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
         messages=[{"role": "user", "content":prompt}],
@@ -127,10 +128,11 @@ answers = [
     "Se aconseja descansar, mantenerse hidratado y acudir al médico si la fiebre es alta o persistente.",
 ]
 
+
 # Función para generar un informe en PDF con preguntas y respuestas
-def generate_pdf_report(questions, answers):
-    if len(questions) != len(answers):
-        raise ValueError("Las listas de preguntas y respuestas deben tener la misma longitud.")
+def generate_pdf_report(questions):
+    if not questions:
+        raise ValueError("La lista de preguntas no puede estar vacía.")
     
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -140,19 +142,47 @@ def generate_pdf_report(questions, answers):
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, "Informe de Pacientes", ln=True, align="C")
     pdf.ln(10)  # Espacio después del título
-
-    # Agregar preguntas y respuestas enumeradas
+    
     pdf.set_font("Arial", size=12)
-    for i, (question, answer) in enumerate(zip(questions, answers), start=1):
+    
+    for i, question in enumerate(questions, start=1):
+        retrieved_data = retrieve_relevant_data(question)
+        enhanced_prompt = f"Datos recuperados:\n{retrieved_data}\n\nPregunta del usuario: {question}"
+        
+        response = client.chat.completions.create(
+            model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+            messages=[
+                {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Debes responder a las preguntas usando la información proporcionada."},
+                {"role": "user", "content": f"A continuación, se proporciona la información relevante y la pregunta del usuario: {enhanced_prompt}. Con estos datos, genera una respuesta clara, concisa y útil."}
+            ],
+            temperature=0.3
+        )
+        answer = response.choices[0].message.content.strip()
+        
+        # Agregar pregunta
         pdf.set_font("Arial", "B", 12)
         pdf.multi_cell(0, 8, f"{i}. {question}")  # Pregunta enumerada
+        pdf.ln(2)  # Espacio entre pregunta y respuesta
+        
+        # Agregar respuesta con indentación
         pdf.set_font("Arial", size=11)
-        pdf.multi_cell(0, 8, answer)  # Respuesta en texto normal
-        pdf.ln(5)  # Espacio entre cada bloque de pregunta-respuesta
-
-    # Guardar el informe en un archivo PDF
+        paragraph_indent = 5
+        list_indent = 10
+        
+        for line in answer.split("\n"):
+            if line.strip():  # Evita líneas en blanco
+                if re.match(r'^[0-9]+\.', line.strip()):  # Detectar listas enumeradas
+                    pdf.cell(list_indent)  # Mayor indentación para listas
+                    pdf.multi_cell(0, 6, line.strip(), align="L")
+                else:
+                    pdf.cell(paragraph_indent)  # Pequeña indentación para respuesta general
+                    wrapped_lines = pdf.multi_cell(0, 6, line.strip(), align="L", border=0)
+        
+        pdf.ln(7)  # Espacio entre bloques de pregunta-respuesta
+    
     pdf.output("informe_pacientes.pdf", "F")
     return "informe_pacientes.pdf"
+
 
 @app.route('/get_patients', methods=['GET'])
 def get_pacientes():
@@ -206,6 +236,8 @@ def send_message():
         retrieved_data = retrieve_relevant_data(message)
         enhanced_prompt = f"Datos recuperados:\n{retrieved_data}\n\nPregunta del usuario: {message}"
 
+        print(f"\n\n{enhanced_prompt}\n\n")
+
         response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
             messages=[
@@ -226,6 +258,6 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
     print("Directorio de trabajo cambiado a:", os.getcwd())  # 🔍 Para depuración
-    generate_pdf_report(common_questions, answers)
+    generate_pdf_report(common_questions)
     print("🔥 Servidor corriendo en http://127.0.0.1:5000/")
     app.run(debug=True, port=5000)
