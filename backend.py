@@ -1,4 +1,4 @@
-import openai  # openai v1.0.0+
+import openai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -14,9 +14,6 @@ def get_db_connection():
     return conn
 
 def get_database_schema():
-    """
-    Obtiene la estructura completa de la base de datos: nombres de tablas, columnas y relaciones.
-    """
     conn = get_db_connection()
     cur = conn.cursor()
     
@@ -36,10 +33,7 @@ def get_database_schema():
     conn.close()
     return schema_info if schema_info else {"error": "No hay tablas en la base de datos."}
 
-def generate_sql_query(user_query, schema_info):
-    """
-    Usa el modelo para generar una consulta SQL considerando todas las tablas relacionadas.
-    """
+def generate_sql_query(user_query, schema_info, patient_id=None):
     if "error" in schema_info:
         return "No hay tablas disponibles para realizar la consulta."
     
@@ -54,27 +48,41 @@ def generate_sql_query(user_query, schema_info):
     
     Pregunta del usuario: {user_query}
     
-    Genera una consulta SQL que extraiga la información relevante considerando las relaciones entre tablas.
+    Genera una consulta SQL válida que extraiga la información relevante considerando las relaciones entre tablas.
+    Si se proporciona un ID de paciente ({patient_id}), incluye siempre el filtro 'WHERE PacienteID = {patient_id}' para limitar los resultados a ese paciente.
+    Asegúrate de que la consulta sea sintácticamente correcta y utilice solo columnas existentes en las tablas.
+    Si la pregunta es vaga (como "¿Cómo se encuentra?"), selecciona columnas relevantes como estado de salud (EstadoAlIngreso, DiagnosticoPrincipal), signos vitales (PresionSistolica, Temperatura, etc.) o notas (Nota), si están disponibles; de lo contrario, usa las columnas básicas (Nombre, Apellido).
     Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
-    Si el usuario pregunta por algún atributo que no existe en la base de datos, cámbialo por el más parecido en nombre o lógica.
-    Si el usuario pregunta por un nombre, pasa siempre tanto el nombre como el apellido.
-    Intenta evitar usar la tabla resumen_evolucion, y recurre a ella solo si en el resto de tablas no hay nada parecido a lo que se pregunta.
-    Si te preguntan por algún nombre propio en la pregunta, búscalo porque es muy probable que aparezca en la base de datos.
+    No digas que no tienes acceso a una base de datos.
     """
-    response = client.chat.completions.create(
-        model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-        messages=[{"role": "user", "content":prompt}],
-        temperature=0.3
-    )
     
-    return response.choices[0].message.content.strip()
+    try:
+        response = client.chat.completions.create(
+            model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+        sql_query = response.choices[0].message.content.strip()
+        
+        if not sql_query.upper().startswith("SELECT"):
+            raise ValueError("La consulta generada no es válida (no es SELECT).")
+        
+        if patient_id and "PACIENTEID" not in sql_query.upper():
+            if "WHERE" in sql_query.upper():
+                sql_query += f" AND PacienteID = {patient_id}"
+            else:
+                sql_query += f" WHERE PacienteID = {patient_id}"
+        
+        return sql_query
+    except Exception as e:
+        print(f"Error generando consulta SQL: {str(e)}")
+        if patient_id:
+            return f"SELECT Nombre, Apellido FROM resumen_pacientes WHERE PacienteID = {patient_id}"
+        return "SELECT * FROM resumen_pacientes LIMIT 1"
 
-def retrieve_relevant_data(user_query):
-    """
-    Recupera información relevante ejecutando una consulta SQL adecuada sobre varias tablas si es necesario.
-    """
+def retrieve_relevant_data(user_query, patient_id=None):
     schema_info = get_database_schema()
-    sql_query = generate_sql_query(user_query, schema_info)
+    sql_query = generate_sql_query(user_query, schema_info, patient_id)
     
     if "No hay tablas disponibles" in sql_query:
         return "No hay datos disponibles en la base de datos."
@@ -83,18 +91,18 @@ def retrieve_relevant_data(user_query):
     cur = conn.cursor()
     
     try:
-        # Imprimir la consulta SQL antes de ejecutarla
         print(f"Ejecutando consulta SQL: {sql_query}")
-
         cur.execute(sql_query)
         results = cur.fetchall()
         conn.close()
         
         retrieved_texts = [dict(row) for row in results]
-        return retrieved_texts if retrieved_texts else "No se encontró información relevante."
+        return retrieved_texts if retrieved_texts else f"No se encontró información específica para el paciente {patient_id} en la base de datos." if patient_id else "No se encontró información relevante."
     except Exception as e:
         conn.close()
-        return f"Error ejecutando la consulta SQL: {str(e)}"
+        error_msg = f"Error ejecutando la consulta SQL: {str(e)}"
+        print(error_msg)
+        return error_msg
 
 # Cargar variables de entorno
 load_dotenv()
@@ -105,12 +113,10 @@ BASE_URL = "https://litellm.dccp.pbu.dedalus.com"
 if not API_KEY:
     raise ValueError("API_KEY no encontrado en el archivo .env")
 
-# Inicializar cliente de OpenAI
 client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-# Inicializar Flask
 app = Flask(__name__)
-CORS(app)  # Permite peticiones desde el frontend
+CORS(app)
 
 common_questions = [
     "¿Cuál es el tratamiento para la diabetes?",
@@ -128,79 +134,40 @@ answers = [
     "Se aconseja descansar, mantenerse hidratado y acudir al médico si la fiebre es alta o persistente.",
 ]
 
-
-# Función para generar un informe en PDF con preguntas y respuestas
-def generate_pdf_report(questions):
-    if not questions:
-        raise ValueError("La lista de preguntas no puede estar vacía.")
+def generate_pdf_report(questions, answers):
+    if len(questions) != len(answers):
+        raise ValueError("Las listas de preguntas y respuestas deben tener la misma longitud.")
     
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     
-    # Configurar fuente y título
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, "Informe de Pacientes", ln=True, align="C")
-    pdf.ln(10)  # Espacio después del título
-    
+    pdf.ln(10)
+
     pdf.set_font("Arial", size=12)
-    
-    for i, question in enumerate(questions, start=1):
-        retrieved_data = retrieve_relevant_data(question)
-        enhanced_prompt = f"Datos recuperados:\n{retrieved_data}\n\nPregunta del usuario: {question}"
-        
-        response = client.chat.completions.create(
-            model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-            messages=[
-                {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Debes responder a las preguntas usando la información proporcionada."},
-                {"role": "user", "content": f"A continuación, se proporciona la información relevante y la pregunta del usuario: {enhanced_prompt}. Con estos datos, genera una respuesta clara, concisa y útil."}
-            ],
-            temperature=0.3
-        )
-        answer = response.choices[0].message.content.strip()
-        
-        # Agregar pregunta
+    for i, (question, answer) in enumerate(zip(questions, answers), start=1):
         pdf.set_font("Arial", "B", 12)
-        pdf.multi_cell(0, 8, f"{i}. {question}")  # Pregunta enumerada
-        pdf.ln(2)  # Espacio entre pregunta y respuesta
-        
-        # Agregar respuesta con indentación
+        pdf.multi_cell(0, 8, f"{i}. {question}")
         pdf.set_font("Arial", size=11)
-        paragraph_indent = 5
-        list_indent = 10
-        
-        for line in answer.split("\n"):
-            if line.strip():  # Evita líneas en blanco
-                if re.match(r'^[0-9]+\.', line.strip()):  # Detectar listas enumeradas
-                    pdf.cell(list_indent)  # Mayor indentación para listas
-                    pdf.multi_cell(0, 6, line.strip(), align="L")
-                else:
-                    pdf.cell(paragraph_indent)  # Pequeña indentación para respuesta general
-                    wrapped_lines = pdf.multi_cell(0, 6, line.strip(), align="L", border=0)
-        
-        pdf.ln(7)  # Espacio entre bloques de pregunta-respuesta
-    
+        pdf.multi_cell(0, 8, answer)
+        pdf.ln(5)
+
     pdf.output("informe_pacientes.pdf", "F")
     return "informe_pacientes.pdf"
 
-
 @app.route('/get_patients', methods=['GET'])
 def get_pacientes():
-    """
-    Devuelve los pacientes (nombre, apellidos, id) desde la base de datos.
-    """
     conn = get_db_connection()
     cur = conn.cursor()
     
     try:
-        # Consulta SQL para obtener los pacientes
         cur.execute("SELECT PacienteID, Nombre, Apellido FROM resumen_pacientes")
         pacientes = cur.fetchall()
         conn.close()
         
-        # Convertir los resultados a una lista de diccionarios
         pacientes_data = [{"id": paciente["PacienteID"], "nombre": paciente["Nombre"], "apellido": paciente["Apellido"]} for paciente in pacientes]
-        
         return jsonify(pacientes_data)
     except Exception as e:
         conn.close()
@@ -210,40 +177,51 @@ def get_pacientes():
 def send_message():
     data = request.json
     message = data.get("message", "")
+    patient_id = data.get("patientId")
+    history = data.get("history", [])  # Historial de los últimos mensajes
     
     if not message:
         return jsonify({"error": "Mensaje vacío"}), 400
 
     try:
+        # Clasificar si la pregunta está relacionada con el paciente usando IA
+        classification_prompt = f"""
+        Determina si la siguiente pregunta está relacionada con un paciente específico o es una pregunta general no relacionada con un paciente en particular.
+        - Si la pregunta menciona "paciente", "él", "ella", "su", un ID numérico ({patient_id} si está presente), incluye algún verbo en la tercera persona del singular, o términos como "diagnóstico", "tratamiento", "estado", "cómo se encuentra", "historial", etc., clasifícala como 'patient_related'. 
+        - Antes de clasificar una pregunta como 'general', accede a los datos del paciente y mira si puedes aportar información útil relacionada con la pregunta sobre el paciente.
+        - Si la pregunta es sobre temas médicos generales (como "¿Qué es la hipertensión?") o no tiene referencia implícita a un paciente, clasifícala como 'general'.
+        Responde solo con 'patient_related' o 'general'.
+
+        Pregunta: {message}
+        """
         classification_response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-            messages=[{"role": "user", "content": f"Determina si el siguiente mensaje es una pregunta médica o una conversación general. Responde solo con 'médica' o 'general'. Si te pregunta algo sobre algún paciente, seguro que es médica\n\nMensaje: {message}"}],
+            messages=[{"role": "user", "content": classification_prompt}],
             temperature=0.3
         )
         classification = classification_response.choices[0].message.content.strip().lower()
-        
-        if classification == "general":
-            response_general = client.chat.completions.create(
-                model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-                messages=[
-                    {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Te van a pedir información sobre algún paciente y tendrás que responder utilizando la información que se te proporcione, de la mejor manera posible"},
-                    {"role": "user", "content": message}
-                ],
-                temperature=0.3
-            )
-            return jsonify({"response": response_general.choices[0].message.content})
-        
-        retrieved_data = retrieve_relevant_data(message)
-        enhanced_prompt = f"Datos recuperados:\n{retrieved_data}\n\nPregunta del usuario: {message}"
 
-        print(f"\n\n{enhanced_prompt}\n\n")
+        # Construir los mensajes para el modelo, incluyendo el historial
+        messages = []
+        if history:
+            messages.extend(history)  # Añadir el historial de los últimos 10 mensajes
+
+        if patient_id and classification == "patient_related":
+            # Pregunta relacionada con el paciente seleccionado
+            context_prompt = f"Eres un asistente virtual dirigido a médicos. La conversación es sobre el paciente con ID {patient_id}. Responde utilizando la información de este paciente disponible en la base de datos. Si no hay datos suficientes para responder, sugiere consultar el historial médico físico. No digas que no tienes acceso a una base de datos específica de pacientes."
+            retrieved_data = retrieve_relevant_data(message, patient_id)
+            enhanced_prompt = f"Datos recuperados del paciente {patient_id}:\n{retrieved_data}\n\nPregunta del usuario: {message}"
+        else:
+            # Pregunta general, incluso con paciente seleccionado
+            context_prompt = "Eres un asistente virtual dirigido a médicos. Responde de manera breve y profesional a preguntas generales o específicas, utilizando tu conocimiento general si no se requiere información de un paciente específico. No digas que no tienes acceso a una base de datos específica de pacientes."
+            enhanced_prompt = f"Pregunta del usuario: {message}"
+
+        messages.append({"role": "system", "content": context_prompt})
+        messages.append({"role": "user", "content": enhanced_prompt})
 
         response = client.chat.completions.create(
             model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-            messages=[
-                {"role": "system", "content": "Eres un asistente virtual dirigido a médicos. Te van a pedir información sobre algún paciente y tendrás que responder utilizando la información que se te proporcione, de la mejor manera posible."},
-                {"role": "user", "content":f"Aquí tienes la pregunta del usuario y la respuesta: {enhanced_prompt}. Con esos datos, da una respuesta lógica, buena, breve y convincente al médico que te pregunta. Si solo recibes los datos de un paciente, no menciones que solo tienes datos de uno; esa es la respuesta, ya filtrada de una gran base de datos, con lo que te tienes que mostar seguro y responder con determinación, y no olvides justificar por qué has elegido esa respuesta en caso de pregunta más bien abierta. Si no estás seguro de la respuesta, déjalo claro, pero sin pasarte. Si te piden un nombre y sabes el apellido, pasa tanto nombre como apellido directamente."}
-            ],
+            messages=messages,
             temperature=0.3
         )
         return jsonify({"response": response.choices[0].message.content})
@@ -254,10 +232,9 @@ def send_message():
         return jsonify({"error": "Ocurrió un error en el servidor", "details": str(e)}), 500
 
 if __name__ == "__main__":
-    # 🔥 Cambia el directorio de trabajo al directorio donde está el script
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
-    print("Directorio de trabajo cambiado a:", os.getcwd())  # 🔍 Para depuración
-    generate_pdf_report(common_questions)
+    print("Directorio de trabajo cambiado a:", os.getcwd())
+    generate_pdf_report(common_questions, answers)
     print("🔥 Servidor corriendo en http://127.0.0.1:5000/")
     app.run(debug=True, port=5000)
