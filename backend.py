@@ -213,7 +213,7 @@ def send_message():
             enhanced_prompt = f"Datos recuperados del paciente {patient_id}:\n{retrieved_data}\n\nPregunta del usuario: {message}"
         else:
             # Pregunta general, incluso con paciente seleccionado
-            context_prompt = "Eres un asistente virtual dirigido a médicos. Responde de manera breve y profesional a preguntas generales o específicas, utilizando tu conocimiento general si no se requiere información de un paciente específico. No digas que no tienes acceso a una base de datos específica de pacientes."
+            context_prompt = "Eres un asistente virtual dirigido a médicos. Responde de manera breve y profesional a preguntas generales o específicas, utilizando tu conocimiento general si no se requiere información de un paciente específico. Si te pregunta por un paciente específico, consulta la base de datos y responde según los datos que te pidan de dicho paciente."
             enhanced_prompt = f"Pregunta del usuario: {message}"
 
         messages.append({"role": "system", "content": context_prompt})
