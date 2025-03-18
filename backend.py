@@ -33,7 +33,7 @@ def get_database_schema():
     conn.close()
     return schema_info if schema_info else {"error": "No hay tablas en la base de datos."}
 
-def generate_sql_query(user_query, schema_info, patient_id=None):
+def generate_sql_query(user_query, schema_info):
     if "error" in schema_info:
         return "No hay tablas disponibles para realizar la consulta."
     
@@ -48,12 +48,14 @@ def generate_sql_query(user_query, schema_info, patient_id=None):
     
     Pregunta del usuario: {user_query}
     
-    Genera una consulta SQL válida que extraiga la información relevante considerando las relaciones entre tablas.
-    Si se proporciona un ID de paciente ({patient_id}), incluye siempre el filtro 'WHERE PacienteID = {patient_id}' para limitar los resultados a ese paciente.
-    Asegúrate de que la consulta sea sintácticamente correcta y utilice solo columnas existentes en las tablas.
-    Si la pregunta es vaga (como "¿Cómo se encuentra?"), selecciona columnas relevantes como estado de salud (EstadoAlIngreso, DiagnosticoPrincipal), signos vitales (PresionSistolica, Temperatura, etc.) o notas (Nota), si están disponibles; de lo contrario, usa las columnas básicas (Nombre, Apellido).
+    Genera una consulta SQL válida para SQLite que extraiga información relevante de forma general (sin filtrar por un paciente específico a menos que se indique explícitamente en la pregunta).
+    Devuelve datos agregados o representativos de todos los pacientes según la pregunta (por ejemplo, promedios, conteos o listas).
+    Asegúrate de que:
+    - La consulta sea sintácticamente correcta y use SOLO columnas existentes en las tablas listadas.
+    - Usa GROUP_CONCAT (sin SEPARATOR, ya que SQLite no lo soporta) en lugar de STRING_AGG para combinar valores como Medicamentos o Procedimientos.
+    - Si la pregunta menciona "resultados de laboratorio", usa la tabla resumen_lab_iniciales y columnas como Glucosa, Hemoglobina, etc.
+    - Si la pregunta es vaga (como "muestra una tabla"), selecciona columnas relevantes como Nombre, Apellido, y signos vitales o datos de laboratorio.
     Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
-    No digas que no tienes acceso a una base de datos.
     """
     
     try:
@@ -67,22 +69,24 @@ def generate_sql_query(user_query, schema_info, patient_id=None):
         if not sql_query.upper().startswith("SELECT"):
             raise ValueError("La consulta generada no es válida (no es SELECT).")
         
-        if patient_id and "PACIENTEID" not in sql_query.upper():
-            if "WHERE" in sql_query.upper():
-                sql_query += f" AND PacienteID = {patient_id}"
-            else:
-                sql_query += f" WHERE PacienteID = {patient_id}"
-        
         return sql_query
     except Exception as e:
         print(f"Error generando consulta SQL: {str(e)}")
-        if patient_id:
-            return f"SELECT Nombre, Apellido FROM resumen_pacientes WHERE PacienteID = {patient_id}"
-        return "SELECT * FROM resumen_pacientes LIMIT 1"
+        return """
+        SELECT 
+            rp.Nombre,
+            rp.Apellido,
+            AVG(rp.PresionSistolica) as PromedioPresion,
+            AVG(rp.Temperatura) as PromedioTemperatura
+        FROM 
+            resumen_pacientes rp
+        GROUP BY 
+            rp.Nombre, rp.Apellido
+        """
 
-def retrieve_relevant_data(user_query, patient_id=None):
+def retrieve_relevant_data(user_query):
     schema_info = get_database_schema()
-    sql_query = generate_sql_query(user_query, schema_info, patient_id)
+    sql_query = generate_sql_query(user_query, schema_info)
     
     if "No hay tablas disponibles" in sql_query:
         return "No hay datos disponibles en la base de datos."
@@ -90,21 +94,59 @@ def retrieve_relevant_data(user_query, patient_id=None):
     conn = get_db_connection()
     cur = conn.cursor()
     
-    try:
-        print(f"Ejecutando consulta SQL: {sql_query}")
-        cur.execute(sql_query)
-        results = cur.fetchall()
-        conn.close()
-        
-        retrieved_texts = [dict(row) for row in results]
-        return retrieved_texts if retrieved_texts else f"No se encontró información específica para el paciente {patient_id} en la base de datos." if patient_id else "No se encontró información relevante."
-    except Exception as e:
-        conn.close()
-        error_msg = f"Error ejecutando la consulta SQL: {str(e)}"
-        print(error_msg)
-        return error_msg
+    max_attempts = 3  # Número máximo de reintentos
+    attempt = 0
+    
+    while attempt < max_attempts:
+        try:
+            print(f"Ejecutando consulta SQL (intento {attempt + 1}): {sql_query}")
+            cur.execute(sql_query)
+            results = cur.fetchall()
+            retrieved_texts = [dict(row) for row in results]
+            conn.close()
+            return retrieved_texts if retrieved_texts else "No se encontró información relevante en la base de datos."
+        except sqlite3.OperationalError as e:
+            error_msg = str(e)
+            print(f"Error ejecutando la consulta SQL: {error_msg}")
+            
+            # Manejar funciones no soportadas como STRING_AGG
+            if "no such function: STRING_AGG" in error_msg:
+                sql_query = sql_query.replace("STRING_AGG", "GROUP_CONCAT")
+                print(f"Consulta ajustada reemplazando STRING_AGG por GROUP_CONCAT: {sql_query}")
+            # Manejar errores de "no such column"
+            elif "no such column" in error_msg:
+                match = re.search(r"no such column: ([\w\.]+)", error_msg)
+                if match:
+                    bad_column = match.group(1)
+                    print(f"Columna problemática detectada: {bad_column}")
+                    sql_query_lines = sql_query.split('\n')
+                    new_query_lines = [line for line in sql_query_lines if bad_column not in line]
+                    sql_query = '\n'.join(new_query_lines).strip()
+                    print(f"Consulta ajustada eliminando columna: {sql_query}")
+                else:
+                    conn.close()
+                    return f"Error ejecutando la consulta SQL: {error_msg}"
+            else:
+                conn.close()
+                return f"Error ejecutando la consulta SQL: {error_msg}"
+            
+            if not sql_query.strip():
+                conn.close()
+                return "No se pudo generar una consulta válida tras eliminar partes problemáticas."
+            
+            attempt += 1
+            if attempt == max_attempts:
+                conn.close()
+                return f"Error persistente tras {max_attempts} intentos: no se pudo ajustar la consulta."
+        except Exception as e:
+            error_msg = f"Error inesperado ejecutando la consulta SQL: {str(e)}"
+            print(error_msg)
+            conn.close()
+            return error_msg
+    
+    conn.close()
+    return "No se pudo procesar la consulta tras varios intentos."
 
-# Cargar variables de entorno
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
@@ -165,26 +207,24 @@ def get_pacientes():
     try:
         cur.execute("SELECT PacienteID, Nombre, Apellido FROM resumen_pacientes")
         pacientes = cur.fetchall()
-        conn.close()
-        
         pacientes_data = [{"id": paciente["PacienteID"], "nombre": paciente["Nombre"], "apellido": paciente["Apellido"]} for paciente in pacientes]
         return jsonify(pacientes_data)
     except Exception as e:
-        conn.close()
         return jsonify({"error": f"Error al obtener los pacientes: {str(e)}"}), 500
+    finally:
+        conn.close()
 
 @app.route("/send_message", methods=["POST"])
 def send_message():
     data = request.json
     message = data.get("message", "")
     patient_id = data.get("patientId")
-    history = data.get("history", [])  # Historial de los últimos mensajes
+    history = data.get("history", [])
     
     if not message:
         return jsonify({"error": "Mensaje vacío"}), 400
 
     try:
-        # Clasificar si la pregunta está relacionada con el paciente usando IA
         classification_prompt = f"""
         Determina si la siguiente pregunta está relacionada con un paciente específico o es una pregunta general no relacionada con un paciente en particular.
         - Si la pregunta menciona "paciente", "él", "ella", "su", un ID numérico ({patient_id} si está presente), incluye algún verbo en la tercera persona del singular, o términos como "diagnóstico", "tratamiento", "estado", "cómo se encuentra", "historial", etc., clasifícala como 'patient_related'. 
@@ -201,19 +241,16 @@ def send_message():
         )
         classification = classification_response.choices[0].message.content.strip().lower()
 
-        # Construir los mensajes para el modelo, incluyendo el historial
         messages = []
         if history:
-            messages.extend(history)  # Añadir el historial de los últimos 10 mensajes
+            messages.extend(history)
 
         if patient_id and classification == "patient_related":
-            # Pregunta relacionada con el paciente seleccionado
             context_prompt = f"Eres un asistente virtual dirigido a médicos. La conversación es sobre el paciente con ID {patient_id}. Responde utilizando la información de este paciente disponible en la base de datos. Si no hay datos suficientes para responder, sugiere consultar el historial médico físico. No digas que no tienes acceso a una base de datos específica de pacientes."
-            retrieved_data = retrieve_relevant_data(message, patient_id)
+            retrieved_data = retrieve_relevant_data(f"Datos del paciente con ID {patient_id}")
             enhanced_prompt = f"Datos recuperados del paciente {patient_id}:\n{retrieved_data}\n\nPregunta del usuario: {message}"
         else:
-            # Pregunta general, incluso con paciente seleccionado
-            context_prompt = "Eres un asistente virtual dirigido a médicos. Responde de manera breve y profesional a preguntas generales o específicas, utilizando tu conocimiento general si no se requiere información de un paciente específico. Si te pregunta por un paciente específico, consulta la base de datos y responde según los datos que te pidan de dicho paciente."
+            context_prompt = "Eres un asistente virtual dirigido a médicos. Responde de manera breve y profesional a preguntas generales o específicas, utilizando tu conocimiento general si no se requiere información de un paciente específico."
             enhanced_prompt = f"Pregunta del usuario: {message}"
 
         messages.append({"role": "system", "content": context_prompt})
@@ -227,9 +264,30 @@ def send_message():
         return jsonify({"response": response.choices[0].message.content})
     
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"Error en send_message: {str(e)}")
         print(traceback.format_exc())
         return jsonify({"error": "Ocurrió un error en el servidor", "details": str(e)}), 500
+
+@app.route('/get_patient_data', methods=['POST'])
+def get_patient_data():
+    data = request.json
+    message = data.get("message", "")
+    
+    if not message:
+        return jsonify({"error": "Mensaje no proporcionado"}), 400
+
+    try:
+        retrieved_data = retrieve_relevant_data(message)
+        if isinstance(retrieved_data, str):
+            print(f"No se pudieron recuperar datos: {retrieved_data}")
+            return jsonify({"error": retrieved_data}), 400
+        
+        print(f"Datos recuperados para chat general: {retrieved_data}")
+        return jsonify(retrieved_data)
+    except Exception as e:
+        print(f"Error en get_patient_data: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({"error": f"Error al procesar los datos: {str(e)}"}), 500
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
