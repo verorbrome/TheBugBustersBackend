@@ -49,15 +49,15 @@ def generate_sql_query(user_query, schema_info):
     Pregunta del usuario: {user_query}
     
     Genera una consulta SQL válida para SQLite que extraiga información relevante de forma general (sin filtrar por un paciente específico a menos que se indique explícitamente en la pregunta).
-    Devuelve datos agregados o representativos de todos los pacientes según la pregunta (por ejemplo, promedios, conteos o listas).
     Asegúrate de que:
-    - La consulta sea sintácticamente correcta y use SOLO columnas existentes en las tablas listadas.
+    - La consulta sea sintáctica correcta y use SOLO columnas existentes en las tablas listadas.
     - Usa GROUP_CONCAT (sin SEPARATOR, ya que SQLite no lo soporta) en lugar de STRING_AGG para combinar valores como Medicamentos o Procedimientos.
     - Si la pregunta menciona "resultados de laboratorio", usa la tabla resumen_lab_iniciales y columnas como Glucosa, Hemoglobina, etc.
-    - Si la pregunta es vaga (como "muestra una tabla"), selecciona columnas relevantes como PacienteID, Nombre, Apellido, y signos vitales o datos de laboratorio.
+    - Si la pregunta incluye "gráfica", selecciona al menos una columna de etiquetas (como Fecha o PacienteID) y una columna numérica (como PresionSistolica, Temperatura, Glucosa) para valores, evitando agregaciones complejas a menos que se pidan explícitamente.
+    - Si la pregunta es vaga (como "muestra una tabla" o "muestra una gráfica"), selecciona columnas relevantes como PacienteID, Nombre, Apellido, Fecha, y signos vitales o datos de laboratorio.
     - Ordena las columnas en el SELECT en este orden prioritario cuando estén disponibles: PacienteID primero, luego Nombre, Apellido, Fecha, y después el resto de columnas en el orden que consideres lógico (no alfabético).
     - Si ordenas por PacienteID (por ejemplo, con ORDER BY), usa CAST(PacienteID AS INTEGER) para asegurar un orden numérico correcto (1, 2, 3, ...), no como texto (1, 10, 100, ...).
-    - Si la pregunta no especifica un orden, incluye ORDER BY CAST(PacienteID AS INTEGER) por defecto para tablas con PacienteID.
+    - Si la pregunta no especifica un orden y tiene PacienteID, incluye ORDER BY CAST(PacienteID AS INTEGER) por defecto.
     Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
     """
     
@@ -75,6 +75,17 @@ def generate_sql_query(user_query, schema_info):
         return sql_query
     except Exception as e:
         print(f"Error generando consulta SQL: {str(e)}")
+        if "gráfica" in user_query.lower():
+            return """
+            SELECT 
+                rp.PacienteID,
+                rp.FechaIngreso,
+                rp.PresionSistolica
+            FROM 
+                resumen_pacientes rp
+            ORDER BY 
+                CAST(rp.PacienteID AS INTEGER)
+            """
         return """
         SELECT 
             rp.PacienteID,
@@ -108,10 +119,8 @@ def retrieve_relevant_data(user_query):
         try:
             print(f"Ejecutando consulta SQL (intento {attempt + 1}): {sql_query}")
             cur.execute(sql_query)
-            # Obtener nombres de columnas en el orden del SELECT
             column_names = [description[0] for description in cur.description]
             results = cur.fetchall()
-            # Devolver filas como listas ordenadas en lugar de diccionarios
             retrieved_texts = [list(row) for row in results]
             conn.close()
             return {"columns": column_names, "data": retrieved_texts} if retrieved_texts else "No se encontró información relevante en la base de datos."
@@ -119,11 +128,9 @@ def retrieve_relevant_data(user_query):
             error_msg = str(e)
             print(f"Error ejecutando la consulta SQL: {error_msg}")
             
-            # Manejar funciones no soportadas como STRING_AGG
             if "no such function: STRING_AGG" in error_msg:
                 sql_query = sql_query.replace("STRING_AGG", "GROUP_CONCAT")
                 print(f"Consulta ajustada reemplazando STRING_AGG por GROUP_CONCAT: {sql_query}")
-            # Manejar errores de "no such column"
             elif "no such column" in error_msg:
                 match = re.search(r"no such column: ([\w\.]+)", error_msg)
                 if match:
