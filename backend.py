@@ -54,7 +54,10 @@ def generate_sql_query(user_query, schema_info):
     - La consulta sea sintácticamente correcta y use SOLO columnas existentes en las tablas listadas.
     - Usa GROUP_CONCAT (sin SEPARATOR, ya que SQLite no lo soporta) en lugar de STRING_AGG para combinar valores como Medicamentos o Procedimientos.
     - Si la pregunta menciona "resultados de laboratorio", usa la tabla resumen_lab_iniciales y columnas como Glucosa, Hemoglobina, etc.
-    - Si la pregunta es vaga (como "muestra una tabla"), selecciona columnas relevantes como Nombre, Apellido, y signos vitales o datos de laboratorio.
+    - Si la pregunta es vaga (como "muestra una tabla"), selecciona columnas relevantes como PacienteID, Nombre, Apellido, y signos vitales o datos de laboratorio.
+    - Ordena las columnas en el SELECT en este orden prioritario cuando estén disponibles: PacienteID primero, luego Nombre, Apellido, Fecha, y después el resto de columnas en el orden que consideres lógico (no alfabético).
+    - Si ordenas por PacienteID (por ejemplo, con ORDER BY), usa CAST(PacienteID AS INTEGER) para asegurar un orden numérico correcto (1, 2, 3, ...), no como texto (1, 10, 100, ...).
+    - Si la pregunta no especifica un orden, incluye ORDER BY CAST(PacienteID AS INTEGER) por defecto para tablas con PacienteID.
     Solo devuelve la consulta SQL sin explicaciones ni formato adicional.
     """
     
@@ -74,14 +77,18 @@ def generate_sql_query(user_query, schema_info):
         print(f"Error generando consulta SQL: {str(e)}")
         return """
         SELECT 
+            rp.PacienteID,
             rp.Nombre,
             rp.Apellido,
+            rp.FechaIngreso,
             AVG(rp.PresionSistolica) as PromedioPresion,
             AVG(rp.Temperatura) as PromedioTemperatura
         FROM 
             resumen_pacientes rp
         GROUP BY 
-            rp.Nombre, rp.Apellido
+            rp.PacienteID, rp.Nombre, rp.Apellido, rp.FechaIngreso
+        ORDER BY 
+            CAST(rp.PacienteID AS INTEGER)
         """
 
 def retrieve_relevant_data(user_query):
@@ -101,10 +108,13 @@ def retrieve_relevant_data(user_query):
         try:
             print(f"Ejecutando consulta SQL (intento {attempt + 1}): {sql_query}")
             cur.execute(sql_query)
+            # Obtener nombres de columnas en el orden del SELECT
+            column_names = [description[0] for description in cur.description]
             results = cur.fetchall()
-            retrieved_texts = [dict(row) for row in results]
+            # Devolver filas como listas ordenadas en lugar de diccionarios
+            retrieved_texts = [list(row) for row in results]
             conn.close()
-            return retrieved_texts if retrieved_texts else "No se encontró información relevante en la base de datos."
+            return {"columns": column_names, "data": retrieved_texts} if retrieved_texts else "No se encontró información relevante en la base de datos."
         except sqlite3.OperationalError as e:
             error_msg = str(e)
             print(f"Error ejecutando la consulta SQL: {error_msg}")
